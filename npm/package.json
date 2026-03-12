@@ -1,5 +1,5 @@
 {
-  "name": "envsync",
+  "name": "@sanki92/envsync",
   "version": "0.1.0",
   "description": "Encrypted .env sync for dev teams using GitHub SSH keys and git",
   "bin": {

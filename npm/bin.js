@@ -39,6 +39,16 @@ function getBinaryName() {
   return `envsync_${goos}_${goarch}${ext}`;
 }
 
+function getBinaryNames() {
+  const primary = getBinaryName();
+  if (os.platform() !== "win32") {
+    return [primary];
+  }
+
+  // v0.1.0 Windows release assets were uploaded with a double .exe suffix.
+  return [primary, `${primary}.exe`];
+}
+
 function getBinaryPath() {
   const cacheDir = path.join(os.homedir(), ".envsync", "bin");
   if (!fs.existsSync(cacheDir)) {
@@ -74,25 +84,31 @@ async function ensureBinary() {
     return binPath;
   }
 
-  const binaryName = getBinaryName();
-  const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${binaryName}`;
-
   console.error(`Downloading envsync v${VERSION}...`);
 
-  try {
-    const data = await download(url);
-    fs.writeFileSync(binPath, data, { mode: 0o755 });
-    console.error("Done.");
-    return binPath;
-  } catch (err) {
-    console.error(`Failed to download binary: ${err.message}`);
-    console.error(`URL: ${url}`);
-    console.error("");
-    console.error("You can build from source:");
-    console.error("  git clone https://github.com/sanki92/envsync.git");
-    console.error("  cd envsync && go build -o envsync .");
-    process.exit(1);
+  const errors = [];
+  for (const binaryName of getBinaryNames()) {
+    const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${binaryName}`;
+
+    try {
+      const data = await download(url);
+      fs.writeFileSync(binPath, data, { mode: 0o755 });
+      console.error("Done.");
+      return binPath;
+    } catch (err) {
+      errors.push(`${url} (${err.message})`);
+    }
   }
+
+  console.error("Failed to download binary.");
+  for (const error of errors) {
+    console.error(`  ${error}`);
+  }
+  console.error("");
+  console.error("You can build from source:");
+  console.error("  git clone https://github.com/sanki92/envsync.git");
+  console.error("  cd envsync && go build -o envsync .");
+  process.exit(1);
 }
 
 async function main() {
