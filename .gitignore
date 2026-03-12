@@ -1,0 +1,13 @@
+envsync
+envsync.exe
+dist/
+
+.idea/
+.vscode/
+*.swp
+
+.DS_Store
+Thumbs.db
+
+/tmp/
+

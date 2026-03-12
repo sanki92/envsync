@@ -1,0 +1,27 @@
+{
+  "name": "envsync",
+  "version": "0.1.0",
+  "description": "Encrypted .env sync for dev teams using GitHub SSH keys and git",
+  "bin": {
+    "envsync": "bin.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sanki92/envsync.git"
+  },
+  "keywords": [
+    "env",
+    "dotenv",
+    "encryption",
+    "secrets",
+    "team",
+    "sync",
+    "age",
+    "ssh"
+  ],
+  "license": "MIT",
+  "author": "sanki92",
+  "files": [
+    "bin.js"
+  ]
+}
