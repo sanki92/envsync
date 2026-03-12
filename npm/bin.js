@@ -4,7 +4,7 @@ const fs = require("fs");
 const os = require("os");
 const https = require("https");
 
-const VERSION = "0.1.0";
+const VERSION = require("./package.json").version;
 const REPO = "sanki92/envsync";
 
 function getPlatform() {
