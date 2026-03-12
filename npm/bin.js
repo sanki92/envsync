@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 const { execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
