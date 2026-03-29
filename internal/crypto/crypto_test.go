@@ -1,6 +1,9 @@
 package crypto_test
 
 import (
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 
 	"filippo.io/age"
@@ -138,5 +141,116 @@ func TestFingerprintSSHPublicKey(t *testing.T) {
 
 	if info.Comment != "test@example.com" {
 		t.Fatalf("expected comment test@example.com, got %s", info.Comment)
+	}
+}
+
+func TestSSHEncryptDecryptRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := dir + "/.ssh/id_ed25519"
+	pubPath := keyPath + ".pub"
+
+	generateTestSSHKey(t, dir)
+
+	pubBytes, err := os.ReadFile(pubPath)
+	if err != nil {
+		t.Fatalf("read pub key: %v", err)
+	}
+	sshPubKey := strings.TrimSpace(string(pubBytes))
+
+	recipient, err := crypto.ParseSSHRecipient(sshPubKey)
+	if err != nil {
+		t.Fatalf("ParseSSHRecipient: %v", err)
+	}
+
+	plaintext := "super-secret-value-123"
+	ciphertext, err := crypto.Encrypt(plaintext, []age.Recipient{recipient})
+	if err != nil {
+		t.Fatalf("Encrypt with SSH recipient: %v", err)
+	}
+
+	identity, err := crypto.LoadSSHIdentity(dir)
+	if err != nil {
+		t.Fatalf("LoadSSHIdentity: %v", err)
+	}
+
+	decrypted, err := crypto.Decrypt(ciphertext, []age.Identity{identity})
+	if err != nil {
+		t.Fatalf("Decrypt with SSH identity: %v", err)
+	}
+
+	if decrypted != plaintext {
+		t.Fatalf("SSH roundtrip failed: got %q, want %q", decrypted, plaintext)
+	}
+}
+
+func TestSSHMultiRecipient(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	generateTestSSHKey(t, dir1)
+	generateTestSSHKey(t, dir2)
+
+	pub1, _ := os.ReadFile(dir1 + "/.ssh/id_ed25519.pub")
+	pub2, _ := os.ReadFile(dir2 + "/.ssh/id_ed25519.pub")
+
+	recipients, err := crypto.ParseSSHRecipients([]string{
+		strings.TrimSpace(string(pub1)),
+		strings.TrimSpace(string(pub2)),
+	})
+	if err != nil {
+		t.Fatalf("ParseSSHRecipients: %v", err)
+	}
+
+	plaintext := "shared-secret"
+	ciphertext, err := crypto.Encrypt(plaintext, recipients)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	for i, dir := range []string{dir1, dir2} {
+		id, err := crypto.LoadSSHIdentity(dir)
+		if err != nil {
+			t.Fatalf("LoadSSHIdentity %d: %v", i, err)
+		}
+		decrypted, err := crypto.Decrypt(ciphertext, []age.Identity{id})
+		if err != nil {
+			t.Fatalf("Decrypt %d: %v", i, err)
+		}
+		if decrypted != plaintext {
+			t.Fatalf("user %d: got %q, want %q", i, decrypted, plaintext)
+		}
+	}
+}
+
+func TestParseSSHRecipients(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	generateTestSSHKey(t, dir1)
+	generateTestSSHKey(t, dir2)
+
+	pub1, _ := os.ReadFile(dir1 + "/.ssh/id_ed25519.pub")
+	pub2, _ := os.ReadFile(dir2 + "/.ssh/id_ed25519.pub")
+
+	recipients, err := crypto.ParseSSHRecipients([]string{
+		strings.TrimSpace(string(pub1)),
+		strings.TrimSpace(string(pub2)),
+		"", "  ",
+	})
+	if err != nil {
+		t.Fatalf("ParseSSHRecipients: %v", err)
+	}
+	if len(recipients) != 2 {
+		t.Fatalf("expected 2 recipients, got %d", len(recipients))
+	}
+}
+
+func generateTestSSHKey(t *testing.T, homeDir string) {
+	t.Helper()
+	sshDir := homeDir + "/.ssh"
+	os.MkdirAll(sshDir, 0700)
+
+	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", sshDir+"/id_ed25519", "-N", "", "-q")
+	if err := cmd.Run(); err != nil {
+		t.Skipf("ssh-keygen not available: %v", err)
 	}
 }

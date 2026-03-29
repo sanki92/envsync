@@ -3,24 +3,23 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"strings"
 
-	"filippo.io/age"
-	"github.com/sanki92/envsync/internal/config"
-	"github.com/sanki92/envsync/internal/crypto"
+	"github.com/sanki92/envsync/internal/envpath"
+	gitutil "github.com/sanki92/envsync/internal/git"
+	"github.com/sanki92/envsync/internal/output"
 	"github.com/sanki92/envsync/internal/team"
 	"github.com/sanki92/envsync/internal/vault"
 	"github.com/spf13/cobra"
-
-	gitutil "github.com/sanki92/envsync/internal/git"
 )
 
-var lockEnvFile string
-var lockPush bool
+var lockFile string
 
 var lockCmd = &cobra.Command{
 	Use:   "lock",
-	Short: "Encrypt .env.local → .env.vault",
+	Short: "Encrypt .env.local -> .env.vault",
+	Example: `  envsync lock
+  envsync lock --env staging
+  envsync lock --file .env.custom`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, _ := os.Getwd()
 		repoRoot, err := gitutil.FindRepoRoot(cwd)
@@ -28,13 +27,18 @@ var lockCmd = &cobra.Command{
 			return fmt.Errorf("must be inside a git repository: %w", err)
 		}
 
-		envPath := repoRoot + "/" + lockEnvFile
-		vaultPath := repoRoot + "/.env.vault"
+		envFile := lockFile
+		if envFile == "" {
+			envFile = envpath.LocalPath(repoRoot, envFlag)
+		} else {
+			envFile = repoRoot + "/" + lockFile
+		}
+		vaultPath := envpath.VaultPath(repoRoot, envFlag)
 		teamPath := repoRoot + "/.envteam"
 
-		entries, err := vault.ReadEnvFile(envPath)
+		entries, err := vault.ReadEnvFile(envFile)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", lockEnvFile, err)
+			return fmt.Errorf("read %s: %w", envFile, err)
 		}
 
 		tf, err := team.ReadTeamFile(teamPath)
@@ -42,17 +46,13 @@ var lockCmd = &cobra.Command{
 			return fmt.Errorf("read .envteam: %w (run 'envsync init' first)", err)
 		}
 
-		pubKeys := tf.GetPublicKeys()
-		if len(pubKeys) == 0 {
-			return fmt.Errorf("no team members found in .envteam")
+		sshPubKeys := tf.GetSSHPublicKeysForEnv(envFlag)
+		if len(sshPubKeys) == 0 {
+			return fmt.Errorf("no team members with access to '%s' environment", envpath.LocalFilename(envFlag))
 		}
 
-		recipients, err := crypto.ParseRecipients(pubKeys)
-		if err != nil {
-			return fmt.Errorf("parse recipient keys: %w", err)
-		}
-
-		vaultEntries, err := vault.LockVault(entries, recipients, tf.MemberNames())
+		memberNames := tf.MemberNamesForEnv(envFlag)
+		vaultEntries, err := vault.LockVaultSSH(entries, sshPubKeys, memberNames)
 		if err != nil {
 			return fmt.Errorf("encrypt: %w", err)
 		}
@@ -67,10 +67,20 @@ var lockCmd = &cobra.Command{
 				kvCount++
 			}
 		}
-		fmt.Printf("[lock] %d keys -> .env.vault\n", kvCount)
 
-		if lockPush {
-			fmt.Println("  (auto-push not implemented yet, commit manually)")
+		if output.JSONMode {
+			output.PrintJSON(output.Result{
+				Command: "lock",
+				Success: true,
+				Data: map[string]interface{}{
+					"keys":        kvCount,
+					"recipients":  len(sshPubKeys),
+					"vault":       envpath.VaultFilename(envFlag),
+					"environment": envFlag,
+				},
+			})
+		} else {
+			fmt.Printf("[lock] %d keys -> %s\n", kvCount, envpath.VaultFilename(envFlag))
 		}
 
 		return nil
@@ -78,21 +88,6 @@ var lockCmd = &cobra.Command{
 }
 
 func init() {
-	lockCmd.Flags().StringVar(&lockEnvFile, "env", ".env.local", "Source file")
-	lockCmd.Flags().BoolVar(&lockPush, "push", false, "Auto git add + commit")
+	lockCmd.Flags().StringVar(&lockFile, "file", "", "Source file (overrides default path)")
 	rootCmd.AddCommand(lockCmd)
-}
-
-func loadIdentity() ([]age.Identity, error) {
-	privKeyData, err := config.LoadPrivateKey()
-	if err != nil {
-		return nil, err
-	}
-
-	privKey := strings.TrimSpace(privKeyData)
-	id, err := crypto.ParseIdentity(privKey)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-	return []age.Identity{id}, nil
 }

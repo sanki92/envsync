@@ -5,21 +5,20 @@ import (
 	"os"
 	"strings"
 
-	"filippo.io/age"
-	"github.com/sanki92/envsync/internal/config"
 	"github.com/sanki92/envsync/internal/crypto"
+	"github.com/sanki92/envsync/internal/envpath"
 	gitutil "github.com/sanki92/envsync/internal/git"
+	"github.com/sanki92/envsync/internal/output"
 	"github.com/sanki92/envsync/internal/team"
 	"github.com/sanki92/envsync/internal/vault"
 	"github.com/spf13/cobra"
 )
 
-var initEnvFile string
-var initVaultFile string
-
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize envsync in the current repository",
+	Example: `  envsync init
+  envsync init --env staging`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, _ := os.Getwd()
 		repoRoot, err := gitutil.FindRepoRoot(cwd)
@@ -27,62 +26,51 @@ var initCmd = &cobra.Command{
 			return fmt.Errorf("must be inside a git repository: %w", err)
 		}
 
-		envPath := repoRoot + "/" + initEnvFile
-		vaultPath := repoRoot + "/" + initVaultFile
+		envPath := envpath.LocalPath(repoRoot, envFlag)
+		vaultPath := envpath.VaultPath(repoRoot, envFlag)
 		teamPath := repoRoot + "/.envteam"
 
 		if _, err := os.Stat(vaultPath); err == nil {
-			return fmt.Errorf(".env.vault already exists, already initialized")
+			return fmt.Errorf("%s already exists, already initialized", envpath.VaultFilename(envFlag))
 		}
 
 		if _, err := os.Stat(envPath); err != nil {
-			return fmt.Errorf("no %s found, create one first with your environment variables", initEnvFile)
+			return fmt.Errorf("no %s found, create one first with your environment variables", envpath.LocalFilename(envFlag))
 		}
 
-		fmt.Println("[init] starting...")
+		output.Step(1, 5, "checking SSH key...")
 
-		privKey, pubKey, err := crypto.GenerateKeypair()
+		home, _ := os.UserHomeDir()
+		sshPubKey, sshPath, err := crypto.ReadLocalSSHPublicKey(home)
 		if err != nil {
-			return fmt.Errorf("generate keypair: %w", err)
+			return fmt.Errorf("no SSH key found, run: ssh-keygen -t ed25519 -C \"your-email@example.com\"")
 		}
 
-		if err := config.SaveKeypair(privKey, pubKey); err != nil {
-			return fmt.Errorf("save keypair: %w", err)
+		info, err := crypto.FingerprintSSHPublicKey(sshPubKey)
+		if err != nil {
+			return fmt.Errorf("fingerprint SSH key: %w", err)
 		}
-		fmt.Println("  [ok] generated age keypair in ~/.envsync/")
+		output.OK(fmt.Sprintf("SSH key found at %s (%s)", sshPath, info.Type))
 
 		username := getGitUsername()
 		if username == "" {
 			username = "owner"
 		}
 
-		home, _ := os.UserHomeDir()
-		sshFingerprint := ""
-		sshPubKey, _, err := crypto.ReadLocalSSHPublicKey(home)
-		if err == nil {
-			info, err := crypto.FingerprintSSHPublicKey(sshPubKey)
-			if err == nil {
-				sshFingerprint = info.Fingerprint
-			}
-		}
-
-		tf := team.NewTeamFile(username, sshFingerprint, pubKey, username)
+		output.Step(2, 5, "creating team manifest...")
+		tf := team.NewTeamFile(username, info.Fingerprint, sshPubKey, username)
 		if err := team.WriteTeamFile(teamPath, tf); err != nil {
 			return fmt.Errorf("write .envteam: %w", err)
 		}
-		fmt.Println("  [ok] created .envteam")
+		output.OK("created .envteam")
 
+		output.Step(3, 5, "encrypting vault...")
 		entries, err := vault.ReadEnvFile(envPath)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", initEnvFile, err)
+			return fmt.Errorf("read %s: %w", envpath.LocalFilename(envFlag), err)
 		}
 
-		recipient, err := crypto.ParseRecipient(pubKey)
-		if err != nil {
-			return fmt.Errorf("parse own public key: %w", err)
-		}
-
-		vaultEntries, err := vault.LockVault(entries, []age.Recipient{recipient}, []string{username})
+		vaultEntries, err := vault.LockVaultSSH(entries, []string{sshPubKey}, []string{username})
 		if err != nil {
 			return fmt.Errorf("encrypt vault: %w", err)
 		}
@@ -97,25 +85,40 @@ var initCmd = &cobra.Command{
 				kvCount++
 			}
 		}
-		fmt.Printf("  [ok] encrypted %d keys -> %s\n", kvCount, initVaultFile)
+		output.OK(fmt.Sprintf("encrypted %d keys -> %s", kvCount, envpath.VaultFilename(envFlag)))
 
+		output.Step(4, 5, "installing git hook...")
 		if err := gitutil.InstallPostMergeHook(repoRoot); err != nil {
-			fmt.Printf("  [warn] could not install post-merge hook: %v\n", err)
+			output.Warn(fmt.Sprintf("could not install post-merge hook: %v", err))
 		} else {
-			fmt.Println("  [ok] installed post-merge git hook")
+			output.OK("installed post-merge git hook")
 		}
 
-		if err := gitutil.UpdateGitignore(repoRoot, []string{initEnvFile, ".envsync/"}); err != nil {
-			fmt.Printf("  [warn] could not update .gitignore: %v\n", err)
+		output.Step(5, 5, "updating .gitignore...")
+		if err := gitutil.UpdateGitignore(repoRoot, []string{envpath.LocalFilename(envFlag)}); err != nil {
+			output.Warn(fmt.Sprintf("could not update .gitignore: %v", err))
 		} else {
-			fmt.Println("  [ok] updated .gitignore")
+			output.OK("updated .gitignore")
 		}
 
-		fmt.Println()
-		fmt.Println("Done! Next steps:")
-		fmt.Printf("  git add %s .envteam .gitignore\n", initVaultFile)
-		fmt.Println("  git commit -m \"chore: initialize envsync\"")
-		fmt.Println("  git push")
+		if output.JSONMode {
+			output.PrintJSON(output.Result{
+				Command: "init",
+				Success: true,
+				Data: map[string]interface{}{
+					"keys":       kvCount,
+					"vault":      envpath.VaultFilename(envFlag),
+					"team":       []string{username},
+					"repository": repoRoot,
+				},
+			})
+		} else {
+			fmt.Println()
+			fmt.Println("Next steps:")
+			fmt.Printf("  git add %s .envteam .gitignore\n", envpath.VaultFilename(envFlag))
+			fmt.Println("  git commit -m \"chore: initialize envsync\"")
+			fmt.Println("  git push")
+		}
 
 		return nil
 	},
@@ -140,7 +143,5 @@ func getGitUsername() string {
 }
 
 func init() {
-	initCmd.Flags().StringVar(&initEnvFile, "env", ".env.local", "Source env file")
-	initCmd.Flags().StringVar(&initVaultFile, "vault", ".env.vault", "Vault output file")
 	rootCmd.AddCommand(initCmd)
 }

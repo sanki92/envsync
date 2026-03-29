@@ -18,6 +18,22 @@ type VaultHeader struct {
 	LastUpdated time.Time
 }
 
+func LockVaultSSH(entries []EnvEntry, sshPubKeys []string, memberNames []string) ([]EnvEntry, error) {
+	recipients, err := crypto.ParseSSHRecipients(sshPubKeys)
+	if err != nil {
+		return nil, fmt.Errorf("parse SSH recipients: %w", err)
+	}
+	return LockVault(entries, recipients, memberNames)
+}
+
+func UnlockVaultSSH(vaultEntries []EnvEntry, homeDir string) ([]EnvEntry, error) {
+	identity, err := crypto.LoadSSHIdentity(homeDir)
+	if err != nil {
+		return nil, fmt.Errorf("load SSH identity: %w", err)
+	}
+	return UnlockVault(vaultEntries, []age.Identity{identity})
+}
+
 func LockVault(entries []EnvEntry, recipients []age.Recipient, memberNames []string) ([]EnvEntry, error) {
 	header := []EnvEntry{
 		{Comment: "# envsync vault - safe to commit"},

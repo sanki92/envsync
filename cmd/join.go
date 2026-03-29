@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sanki92/envsync/internal/config"
 	"github.com/sanki92/envsync/internal/crypto"
 	gitutil "github.com/sanki92/envsync/internal/git"
 	"github.com/spf13/cobra"
@@ -13,6 +12,7 @@ import (
 var joinCmd = &cobra.Command{
 	Use:   "join",
 	Short: "Join an existing envsync vault as a new team member",
+	Example: `  envsync join`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, _ := os.Getwd()
 		repoRoot, err := gitutil.FindRepoRoot(cwd)
@@ -31,13 +31,16 @@ var joinCmd = &cobra.Command{
 		sshPubKey, sshPath, err := crypto.ReadLocalSSHPublicKey(home)
 		if err != nil {
 			fmt.Println()
-			fmt.Println("[error] no SSH key found")
+			fmt.Println("[err] no SSH key found")
 			fmt.Println()
-			fmt.Println("Run:")
-			fmt.Println("  ssh-keygen -t ed25519 -C \"your-email@example.com\"")
-			fmt.Println("  Then add to GitHub: github.com/settings/keys")
+			fmt.Println("  You need an SSH key for envsync encryption.")
+			fmt.Println("  You can keep using HTTPS/GCM for git operations.")
 			fmt.Println()
-			fmt.Println("Then run: envsync join again")
+			fmt.Println("  Run:")
+			fmt.Println("    ssh-keygen -t ed25519 -C \"your-email@example.com\"")
+			fmt.Println("    Then add to GitHub: github.com/settings/keys")
+			fmt.Println()
+			fmt.Println("  Then run: envsync join")
 			return fmt.Errorf("no SSH key found")
 		}
 
@@ -56,24 +59,6 @@ var joinCmd = &cobra.Command{
 			}
 		}
 
-		if config.HasKeypair() {
-			fmt.Println("  [ok] age keypair already exists in ~/.envsync/")
-		} else {
-			privKey, pubKey, err := crypto.GenerateKeypair()
-			if err != nil {
-				return fmt.Errorf("generate keypair: %w", err)
-			}
-			if err := config.SaveKeypair(privKey, pubKey); err != nil {
-				return fmt.Errorf("save keypair: %w", err)
-			}
-			fmt.Println("  [ok] generated age keypair in ~/.envsync/")
-		}
-
-		pubKey, err := config.LoadPublicKey()
-		if err != nil {
-			return fmt.Errorf("load public key: %w", err)
-		}
-
 		if err := gitutil.InstallPostMergeHook(repoRoot); err != nil {
 			fmt.Printf("  [warn] could not install post-merge hook: %v\n", err)
 		} else {
@@ -81,12 +66,11 @@ var joinCmd = &cobra.Command{
 		}
 
 		fmt.Println()
-		fmt.Println("Almost done! Ask a team admin to run:")
-		fmt.Printf("  envsync add <your-github-username>\n")
+		fmt.Println("Done! Ask a team admin to run:")
+		fmt.Println("  envsync add <your-github-username>")
 		fmt.Println()
-		fmt.Printf("Your age public key: %s\n", pubKey)
-		fmt.Println()
-		fmt.Println("Once added, run: envsync unlock")
+		fmt.Println("Once added, pull the latest changes and run:")
+		fmt.Println("  envsync unlock")
 
 		return nil
 	},

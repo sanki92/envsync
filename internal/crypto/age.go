@@ -5,9 +5,12 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"filippo.io/age"
+	"filippo.io/age/agessh"
+	"golang.org/x/crypto/ssh"
 )
 
 func Encrypt(plaintext string, recipients []age.Recipient) (string, error) {
@@ -91,4 +94,66 @@ func ParseRecipients(pubkeys []string) ([]age.Recipient, error) {
 		recipients = append(recipients, r)
 	}
 	return recipients, nil
+}
+
+func ParseSSHRecipient(sshPubKey string) (age.Recipient, error) {
+	r, err := agessh.ParseRecipient(sshPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("parse SSH recipient: %w", err)
+	}
+	return r, nil
+}
+
+func ParseSSHRecipients(sshPubKeys []string) ([]age.Recipient, error) {
+	var recipients []age.Recipient
+	for _, pk := range sshPubKeys {
+		pk = strings.TrimSpace(pk)
+		if pk == "" {
+			continue
+		}
+		r, err := ParseSSHRecipient(pk)
+		if err != nil {
+			return nil, err
+		}
+		recipients = append(recipients, r)
+	}
+	return recipients, nil
+}
+
+func LoadSSHIdentity(homeDir string) (age.Identity, error) {
+	paths := []string{
+		homeDir + "/.ssh/id_ed25519",
+		homeDir + "/.ssh/id_rsa",
+	}
+
+	for _, privPath := range paths {
+		pemBytes, err := os.ReadFile(privPath)
+		if err != nil {
+			continue
+		}
+
+		identity, err := agessh.ParseIdentity(pemBytes)
+		if err != nil {
+			pubPath := privPath + ".pub"
+			pubBytes, pubErr := os.ReadFile(pubPath)
+			if pubErr != nil {
+				return nil, fmt.Errorf("SSH key at %s is passphrase-protected but no .pub file found: %w", privPath, pubErr)
+			}
+			pubKey, _, _, _, parseErr := ssh.ParseAuthorizedKey(pubBytes)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parse %s: %w", pubPath, parseErr)
+			}
+			encIdentity, encErr := agessh.NewEncryptedSSHIdentity(pubKey, pemBytes, func() ([]byte, error) {
+				return nil, fmt.Errorf("passphrase-protected SSH keys are not supported in non-interactive mode")
+			})
+			if encErr != nil {
+				return nil, fmt.Errorf("load encrypted SSH key: %w", encErr)
+			}
+			return encIdentity, nil
+		}
+
+		return identity, nil
+	}
+
+	return nil, fmt.Errorf("no SSH private key found at ~/.ssh/id_ed25519 or ~/.ssh/id_rsa")
 }

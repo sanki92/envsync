@@ -5,29 +5,23 @@ import (
 	"os"
 
 	"github.com/sanki92/envsync/internal/crypto"
+	"github.com/sanki92/envsync/internal/envpath"
 	gitutil "github.com/sanki92/envsync/internal/git"
 	gh "github.com/sanki92/envsync/internal/github"
+	"github.com/sanki92/envsync/internal/output"
 	"github.com/sanki92/envsync/internal/team"
 	"github.com/sanki92/envsync/internal/vault"
 	"github.com/spf13/cobra"
 )
 
-var addAgeKey string
-
 var addCmd = &cobra.Command{
 	Use:   "add <github-username>",
 	Short: "Add a team member as a vault recipient",
-	Args:  cobra.ExactArgs(1),
+	Example: `  envsync add alice
+  envsync add bob --env staging`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		username := args[0]
-
-		if addAgeKey == "" {
-			return fmt.Errorf("--key is required, ask the user to run 'envsync join' and share their age public key")
-		}
-
-		if _, err := crypto.ParseRecipient(addAgeKey); err != nil {
-			return fmt.Errorf("invalid age public key: %w", err)
-		}
 
 		cwd, _ := os.Getwd()
 		repoRoot, err := gitutil.FindRepoRoot(cwd)
@@ -35,8 +29,8 @@ var addCmd = &cobra.Command{
 			return fmt.Errorf("must be inside a git repository: %w", err)
 		}
 
-		envPath := repoRoot + "/.env.local"
-		vaultPath := repoRoot + "/.env.vault"
+		localPath := envpath.LocalPath(repoRoot, envFlag)
+		vaultPath := envpath.VaultPath(repoRoot, envFlag)
 		teamPath := repoRoot + "/.envteam"
 
 		tf, err := team.ReadTeamFile(teamPath)
@@ -44,56 +38,97 @@ var addCmd = &cobra.Command{
 			return fmt.Errorf("read .envteam: %w (run 'envsync init' first)", err)
 		}
 
-		if _, exists := tf.GetMember(username); exists {
+		existingMember, memberExists := tf.GetMember(username)
+
+		if memberExists && envFlag == "" {
 			return fmt.Errorf("%s is already a team member", username)
 		}
 
-		fmt.Printf("Fetching SSH keys for %s from GitHub...\n", username)
-
-		keys, err := gh.FetchSSHKeys(username)
-		if err != nil {
-			return fmt.Errorf("fetch SSH keys: %w", err)
+		if memberExists && envFlag != "" {
+			for _, e := range existingMember.Environments {
+				if e == envFlag {
+					return fmt.Errorf("%s already has access to %s", username, envFlag)
+				}
+			}
 		}
 
-		sshKey := gh.FindEd25519Key(keys)
-		if sshKey == "" {
-			return fmt.Errorf("no SSH keys found for %s on GitHub", username)
+		var sshKey string
+		var fingerprint string
+
+		if memberExists {
+			sshKey = existingMember.SSHPublicKey
+			fingerprint = existingMember.SSHFingerprint
+			output.OK(fmt.Sprintf("%s already in team, granting %s access", username, envFlag))
+		} else {
+			output.Step(1, 3, fmt.Sprintf("fetching SSH keys for %s from GitHub...", username))
+
+			keys, err := gh.FetchSSHKeys(username)
+			if err != nil {
+				return fmt.Errorf("fetch SSH keys: %w", err)
+			}
+
+			sshKey = gh.FindEd25519Key(keys)
+			if sshKey == "" {
+				return fmt.Errorf("no SSH keys found for %s on GitHub\n\n  They need to:\n    1. ssh-keygen -t ed25519\n    2. Add the key at github.com/settings/keys", username)
+			}
+
+			info, err := crypto.FingerprintSSHPublicKey(sshKey)
+			if err != nil {
+				return fmt.Errorf("fingerprint SSH key: %w", err)
+			}
+			fingerprint = info.Fingerprint
+			output.OK(fmt.Sprintf("SSH key: %s (%s)", info.Fingerprint, info.Type))
+
+			if _, err := crypto.ParseSSHRecipient(sshKey); err != nil {
+				return fmt.Errorf("SSH key not usable for encryption: %w", err)
+			}
 		}
 
-		info, err := crypto.FingerprintSSHPublicKey(sshKey)
-		if err != nil {
-			return fmt.Errorf("fingerprint SSH key: %w", err)
-		}
+		if memberExists && envFlag != "" {
+			if err := tf.AddEnvToMember(username, envFlag); err != nil {
+				return fmt.Errorf("grant env access: %w", err)
+			}
+		} else {
+			addedBy := "unknown"
+			for name := range tf.Members {
+				addedBy = name
+				break
+			}
 
-		fmt.Printf("  SSH key: %s (%s)\n", info.Fingerprint, info.Type)
+			var envs []string
+			if envFlag != "" {
+				envs = []string{envFlag}
+			}
 
-		addedBy := "unknown"
-		for name := range tf.Members {
-			addedBy = name
-			break
-		}
+			if err := tf.AddMember(username, fingerprint, sshKey, addedBy); err != nil {
+				return fmt.Errorf("add member: %w", err)
+			}
 
-		if err := tf.AddMember(username, info.Fingerprint, addAgeKey, addedBy); err != nil {
-			return fmt.Errorf("add member: %w", err)
+			if len(envs) > 0 {
+				m, _ := tf.GetMember(username)
+				m.Environments = envs
+				tf.Members[username] = m
+			}
 		}
 
 		if err := team.WriteTeamFile(teamPath, tf); err != nil {
 			return fmt.Errorf("write .envteam: %w", err)
 		}
-		fmt.Printf("  [ok] added %s to .envteam\n", username)
 
-		entries, err := vault.ReadEnvFile(envPath)
-		if err != nil {
-			return fmt.Errorf("read .env.local: %w (unlock first if needed)", err)
+		if !memberExists {
+			output.OK(fmt.Sprintf("added %s to .envteam", username))
 		}
 
-		pubKeys := tf.GetPublicKeys()
-		recipients, err := crypto.ParseRecipients(pubKeys)
+		output.Step(2, 3, "re-encrypting vault...")
+
+		entries, err := vault.ReadEnvFile(localPath)
 		if err != nil {
-			return fmt.Errorf("parse recipients: %w", err)
+			return fmt.Errorf("read %s: %w (unlock first if needed)", envpath.LocalFilename(envFlag), err)
 		}
 
-		vaultEntries, err := vault.LockVault(entries, recipients, tf.MemberNames())
+		sshPubKeys := tf.GetSSHPublicKeysForEnv(envFlag)
+		memberNames := tf.MemberNamesForEnv(envFlag)
+		vaultEntries, err := vault.LockVaultSSH(entries, sshPubKeys, memberNames)
 		if err != nil {
 			return fmt.Errorf("re-encrypt vault: %w", err)
 		}
@@ -102,18 +137,32 @@ var addCmd = &cobra.Command{
 			return fmt.Errorf("write vault: %w", err)
 		}
 
-		fmt.Printf("  [ok] re-encrypted vault for %d recipients\n", len(recipients))
-		fmt.Println()
-		fmt.Println("Next steps:")
-		fmt.Println("  git add .env.vault .envteam")
-		fmt.Printf("  git commit -m \"chore: add %s to envsync\"\n", username)
-		fmt.Println("  git push")
+		output.OK(fmt.Sprintf("re-encrypted %s for %d recipients", envpath.VaultFilename(envFlag), len(sshPubKeys)))
+
+		output.Step(3, 3, "done")
+
+		if output.JSONMode {
+			output.PrintJSON(output.Result{
+				Command: "add",
+				Success: true,
+				Data: map[string]interface{}{
+					"member":      username,
+					"recipients":  len(sshPubKeys),
+					"environment": envFlag,
+				},
+			})
+		} else {
+			fmt.Println()
+			fmt.Println("Next steps:")
+			fmt.Println("  git add " + envpath.VaultFilename(envFlag) + " .envteam")
+			fmt.Printf("  git commit -m \"chore: add %s to envsync\"\n", username)
+			fmt.Println("  git push")
+		}
 
 		return nil
 	},
 }
 
 func init() {
-	addCmd.Flags().StringVar(&addAgeKey, "key", "", "The user's age public key (from 'envsync join' output)")
 	rootCmd.AddCommand(addCmd)
 }
