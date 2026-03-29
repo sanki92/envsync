@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sanki92/envsync/internal/envpath"
 	gitutil "github.com/sanki92/envsync/internal/git"
 	"github.com/sanki92/envsync/internal/vault"
 	"github.com/spf13/cobra"
@@ -18,6 +19,9 @@ var diffTo string
 var diffCmd = &cobra.Command{
 	Use:   "diff",
 	Short: "Show what changed in the vault between commits",
+	Example: `  envsync diff
+  envsync diff --from HEAD~3
+  envsync diff --from HEAD~1 --to working`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, _ := os.Getwd()
 		repoRoot, err := gitutil.FindRepoRoot(cwd)
@@ -25,21 +29,22 @@ var diffCmd = &cobra.Command{
 			return fmt.Errorf("must be inside a git repository: %w", err)
 		}
 
-		oldContent, err := gitShowFile(repoRoot, diffFrom, ".env.vault")
+		vaultFile := envpath.VaultFilename(envFlag)
+		oldContent, err := gitShowFile(repoRoot, diffFrom, vaultFile)
 		if err != nil {
-			return fmt.Errorf("cannot read .env.vault at %s: %w", diffFrom, err)
+			return fmt.Errorf("cannot read %s at %s: %w", vaultFile, diffFrom, err)
 		}
 
 		var newEntries []vault.EnvEntry
 		if diffTo == "working" {
-			newEntries, err = vault.ReadVaultFile(repoRoot + "/.env.vault")
+			newEntries, err = vault.ReadVaultFile(envpath.VaultPath(repoRoot, envFlag))
 			if err != nil {
-				return fmt.Errorf("read current .env.vault: %w", err)
+				return fmt.Errorf("read current %s: %w", vaultFile, err)
 			}
 		} else {
-			newContent, err := gitShowFile(repoRoot, diffTo, ".env.vault")
+			newContent, err := gitShowFile(repoRoot, diffTo, vaultFile)
 			if err != nil {
-				return fmt.Errorf("cannot read .env.vault at %s: %w", diffTo, err)
+				return fmt.Errorf("cannot read %s at %s: %w", vaultFile, diffTo, err)
 			}
 			newEntries = parseEnvString(newContent)
 		}
@@ -73,11 +78,11 @@ var diffCmd = &cobra.Command{
 		})
 
 		if len(changes) == 0 {
-			fmt.Printf("No changes to .env.vault between %s and %s\n", diffFrom, diffTo)
+			fmt.Printf("No changes to %s between %s and %s\n", vaultFile, diffFrom, diffTo)
 			return nil
 		}
 
-		fmt.Printf("Changes to .env.vault (%s..%s):\n", diffFrom, diffTo)
+		fmt.Printf("Changes to %s (%s..%s):\n", vaultFile, diffFrom, diffTo)
 		for _, c := range changes {
 			switch c.action {
 			case "added":
